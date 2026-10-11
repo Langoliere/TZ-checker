@@ -1,0 +1,52 @@
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-tz_checker}
+      POSTGRES_USER: ${POSTGRES_USER:-tz_checker}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me}
+    volumes: [postgres_data:/var/lib/postgresql/data]
+    healthcheck: {test: [CMD-SHELL, "pg_isready -U ${POSTGRES_USER:-tz_checker}"], interval: 5s, timeout: 5s, retries: 10}
+  redis:
+    image: redis:7.4-alpine
+    healthcheck: {test: [CMD, redis-cli, ping], interval: 5s, timeout: 3s, retries: 10}
+  ollama:
+    image: ollama/ollama:0.12.3
+    volumes: [ollama_data:/root/.ollama]
+    ports: ["11434:11434"]
+    healthcheck: {test: [CMD, ollama, list], interval: 10s, timeout: 5s, retries: 20}
+  ollama-init:
+    image: ollama/ollama:0.12.3
+    environment: {OLLAMA_HOST: http://ollama:11434}
+    entrypoint: ["/bin/sh", "-c"]
+    command: ["ollama pull ${OLLAMA_MODEL:-qwen2.5:14b-instruct} && ollama pull ${OLLAMA_EMBEDDING_MODEL:-bge-m3}"]
+    depends_on: {ollama: {condition: service_healthy}}
+  api:
+    build: .
+    env_file:
+      - path: .env.example
+      - path: .env
+        required: false
+    ports: ["8000:8000"]
+    volumes: [document_data:/data]
+    depends_on: {db: {condition: service_healthy}, redis: {condition: service_healthy}}
+    healthcheck: {test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"], interval: 10s, timeout: 5s, retries: 10}
+  worker:
+    build: .
+    command: [celery, -A, tz_checker.services.tasks.celery_app, worker, --loglevel=INFO, --concurrency=1]
+    env_file:
+      - path: .env.example
+      - path: .env
+        required: false
+    volumes: [document_data:/data]
+    depends_on: {db: {condition: service_healthy}, redis: {condition: service_healthy}, ollama: {condition: service_healthy}}
+  ui:
+    build: .
+    command: [streamlit, run, src/tz_checker/ui/app.py, --server.address=0.0.0.0, --server.port=8501]
+    env_file:
+      - path: .env.example
+      - path: .env
+        required: false
+    ports: ["8501:8501"]
+    depends_on: {api: {condition: service_healthy}}
+volumes: {postgres_data: {}, ollama_data: {}, document_data: {}}
